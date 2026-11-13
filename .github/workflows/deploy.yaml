@@ -1,0 +1,92 @@
+name: Pipeline CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "supereofim/**"
+      - ".github/workflows/deploy.yaml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  ECR_REPOSITORY: supereofim
+  INSTANCE_TAG: website_server
+
+jobs:
+  build_deploy:
+    name: Build (ECR) + Deploy (SSM)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5.0.0
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEPLOY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, Tag, and Push image to Amazon ECR
+        working-directory: supereofim
+        env:
+          IMAGE: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+        run: |
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" .
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+
+      - name: Deploy na EC2 via SSM (sem SSH)
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+        run: |
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=$INSTANCE_TAG" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+            echo "Nenhuma instancia rodando com tag Name=$INSTANCE_TAG"; exit 1
+          fi
+          echo "Instancia alvo: $INSTANCE_ID"
+
+          PARAMS=$(jq -nc --arg reg "$REGISTRY" --arg img "$IMAGE" --arg region "$AWS_REGION" '{commands: [
+            "set -e",
+            "aws ecr get-login-password --region \($region) | docker login --username AWS --password-stdin \($reg)",
+            "docker pull \($img)",
+            "echo parando container antigo site",
+            "docker stop site || true",
+            "echo removendo container antigo site",
+            "docker rm site || true",
+            "echo rodando nova tag da imagem",
+            "docker run -d --restart unless-stopped -p 80:80 --name site \($img)",
+            "echo Imagem foi atualizada!",
+            "docker ps"
+          ]}')
+
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "deploy ${GITHUB_SHA::7}" \
+            --parameters "$PARAMS" \
+            --query "Command.CommandId" --output text)
+          echo "SSM CommandId: $COMMAND_ID"
+
+          # Espera terminar (falha o job se o comando falhar na EC2)
+          aws ssm wait command-executed --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" || true
+
+          aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+            --query "{Status:Status,Saida:StandardOutputContent,Erro:StandardErrorContent}" --output json
+
+          STATUS=$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text)
+          [ "$STATUS" = "Success" ] || { echo "Deploy falhou: $STATUS"; exit 1; }

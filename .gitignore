@@ -1,0 +1,47 @@
+# ===== Terraform =====
+# Diretorios e caches locais
+.terraform/
+**/.terraform/*
+.terraform.lock.hcl
+ 
+# Arquivos de state (NUNCA versionar - podem conter dados sensiveis)
+*.tfstate*
+ 
+# Arquivos de variaveis com valores reais (IP, account id, segredos)
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+ 
+# Planos salvos e crash logs
+*.tfplan
+crash.log
+crash.*.log
+ 
+# Overrides locais
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+ 
+# ===== Chaves e credenciais =====
+*.pem
+*.key
+*.ppk
+.aws/
+credentials
+ 
+# ===== Variaveis de ambiente =====
+.env
+.env.*
+!.env.example
+ 
+# ===== Docker =====
+# (nada obrigatorio, mas evite subir dumps)
+*.tar
+ 
+# ===== Sistema / editores =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
